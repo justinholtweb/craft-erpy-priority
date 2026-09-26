@@ -303,14 +303,22 @@ class PriorityConnector extends Connector
         $ordersForm = (string)$this->setting('ordersForm', 'ORDERS');
         $linesForm = (string)$this->setting('orderLinesForm', 'ORDERITEMS_SUBFORM');
 
-        $existing = $this->query($ordersForm, [
-            '$filter' => "REFERENCE eq '" . $this->escape($document->orderNumber) . "'",
-            '$select' => 'ORDNAME,REFERENCE',
-            '$top' => 1,
-        ]);
+        // Each row is compared as well as filtered for: a form that ignores or mis-applies
+        // `$filter` must not make every order after the first look delivered.
+        $reference = $this->reference($document->orderNumber);
 
-        if ($existing !== [] && $remoteId === null) {
-            return PushResult::alreadyExists((string)$existing[0]['ORDNAME'], (string)$existing[0]['ORDNAME']);
+        if ($remoteId === null) {
+            $existing = $this->query($ordersForm, [
+                '$filter' => "REFERENCE eq '" . $this->escape($reference) . "'",
+                '$select' => 'ORDNAME,REFERENCE',
+                '$top' => 20,
+            ]);
+
+            foreach ($existing as $row) {
+                if (is_array($row) && (string)($row['REFERENCE'] ?? '') === $reference) {
+                    return PushResult::alreadyExists((string)($row['ORDNAME'] ?? ''), (string)($row['ORDNAME'] ?? ''));
+                }
+            }
         }
 
         $lines = [];
@@ -330,7 +338,7 @@ class PriorityConnector extends Connector
         // behind when a line is refused.
         $payload = array_filter([
             'CUSTNAME' => $document->customerCode,
-            'REFERENCE' => mb_substr($document->orderNumber, 0, 32),
+            'REFERENCE' => $reference,
             'CURDATE' => ($document->orderedAt ?? new DateTime())->format('Y-m-d\TH:i:s\Z'),
             'CODE' => $document->currency,
             'PRICELIST' => $this->setting('priceList') ?: null,
@@ -425,6 +433,15 @@ class PriorityConnector extends Connector
         $limit = $this->pageSize($entity, $criteria);
 
         return new Page($items, ($skip !== null && count($rows) >= $limit) ? (string)($skip + $limit) : null);
+    }
+
+    /**
+     * The value written to `REFERENCE`, looked up by a retry and compared against what comes
+     * back: the Commerce number, cut to the field's 32 characters.
+     */
+    private function reference(string $orderNumber): string
+    {
+        return mb_substr($orderNumber, 0, 32);
     }
 
     private function query(string $form, array $query): array
